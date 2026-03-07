@@ -274,7 +274,8 @@
         display: flex;
         flex-direction: column;
         align-items: center;
-        justify-content: flex-start;
+        justify-content: center;
+        gap: clamp(2px, 0.8vmin, 8px);
         padding: clamp(4px, 1.2vmin, 10px);
         min-height: 0;
         min-width: 0;
@@ -299,8 +300,7 @@
         font-size: clamp(2rem, 9vmin, 6rem);
         line-height: 1;
         flex-shrink: 0;
-        margin-bottom: clamp(2px, 0.6vmin, 8px);
-        pointer-events: none;
+        cursor: pointer;
         user-select: none;
     }
     @media (orientation: landscape) {
@@ -334,23 +334,19 @@
     /* ═══════════════════════════════════════════════════════════════
        DINO BOX
        ─────────────────────────────────────────────────────────────
-       Uses a CSS Grid so dinos automatically fill the available space.
-       --dino-cols is set by JS per card (e.g. 5 for num≥5, num itself
-       for num<5).  --dino-rows is set similarly (1 or 2 rows).
-       The SVG viewBox + preserveAspectRatio handle scaling inside each
-       grid cell — no hard-coded pixel sizes needed.
+       Uses flex-wrap so dinos flow into rows naturally.
+       Each .counter-dino is a fixed vw-based size so all dinos look
+       the same across every card — no shrinking for higher numbers.
        ═══════════════════════════════════════════════════════════════ */
     .dino-box {
-        flex: 1;
-        min-height: 0;
-        min-width: 0;
-        display: grid;
-        grid-template-columns: repeat(var(--dino-cols, 5), 1fr);
-        grid-template-rows:    repeat(var(--dino-rows, 1), 1fr);
+        display: flex;
+        flex-wrap: wrap;
+        justify-content: center;
+        align-items: center;
+        align-content: center;
         gap: clamp(2px, 0.7vmin, 7px);
         padding: clamp(2px, 0.5vmin, 6px);
-        overflow: hidden;
-        align-content: center;
+        overflow: visible;
         width: 100%;
     }
 
@@ -358,13 +354,11 @@
        INDIVIDUAL DINO SVG
        ═══════════════════════════════════════════════════════════════ */
     .counter-dino {
-        /* Fill the grid cell; SVG's preserveAspectRatio:meet keeps it square */
-        width:  100%;
-        height: 100%;
-        /* Cap so a single dino doesn't become absurdly huge on big screens */
-        max-width:  24vmin;
-        max-height: 24vmin;
-        margin: auto;           /* centers within the grid cell */
+        /* Fixed size so every dino is the same across all cards.
+           Sized to fit 5 in a row comfortably within a card (≈1/3 of screen width). */
+        width:  clamp(30px, 5.5vw, 65px);
+        height: clamp(30px, 5.5vw, 65px);
+        flex-shrink: 0;
         display: block;
         opacity: 0.28;          /* dim by default — waiting to be counted */
         touch-action: manipulation;
@@ -684,7 +678,9 @@ function speak(text, rate = 0.65) {
         u.volume  = 1;
         const max = setTimeout(resolve, text.length * 85 + 1600);
         u.onend   = () => { clearTimeout(max); resolve(); };
-        u.onerror = () => { clearTimeout(max); resolve(); };
+        // 'interrupted' fires on iOS when cancel() precedes speak() — not a real failure,
+        // so we ignore it and let the safety timeout handle any genuine stalls instead.
+        u.onerror = (e) => { if (e.error !== 'interrupted') { clearTimeout(max); resolve(); } };
         window.speechSynthesis.speak(u);
     });
 }
@@ -706,8 +702,7 @@ function showToast(text, color, ms = 2200) {
 //               second row has the remainder (e.g. 7 → 5+2).
 // This makes the "5 and a bit more" structure visually obvious to toddlers.
 // ═══════════════════════════════════════════════════════════════════════════
-function getGridCols(num) { return Math.min(num, 5); }
-function getGridRows(num) { return Math.ceil(num / 5); }
+// getGridCols / getGridRows removed — dino-box now uses flex-wrap with fixed dino sizes
 
 // ── Per-card counting helpers ─────────────────────────────────────────────────
 
@@ -812,6 +807,17 @@ async function advanceCount() {
 }
 
 // ── Main card-tap handler ─────────────────────────────────────────────────────
+/** Child taps the big number: announce choice, then invite them to count. */
+async function handleNumberTap(num, card) {
+    if (counting.busy) return;
+    if (isGameMode) { await handleCardTap(num, card); return; }
+    counting.busy = true;
+    const label = num === 1 ? 'dinosaur' : 'dinosaurs';
+    await speak(`You chose ${num}! Let's count to ${num}. You try!`, 0.65);
+    counting.busy = false;
+    startCountingCard(card, num);
+}
+
 async function handleCardTap(num, card) {
     if (counting.busy) return;
 
@@ -857,14 +863,10 @@ async function playDinoStory(num, card) {
 // ── Card factory ──────────────────────────────────────────────────────────────
 function createNumberCard(num) {
     const color = COLORS[num - 1];
-    const cols  = getGridCols(num);
-    const rows  = getGridRows(num);
 
     const card = document.createElement('div');
-    card.className       = 'number-card glass';
-    card.dataset.number  = num;
-    // CSS custom properties are inherited by child .dino-box
-    card.style.cssText   = `--dino-cols:${cols}; --dino-rows:${rows};`;
+    card.className      = 'number-card glass';
+    card.dataset.number = num;
 
     // Build dino SVG grid
     let dinoHtml = `<div class="dino-box${showCounters ? '' : ' hidden'}">`;
@@ -883,9 +885,16 @@ function createNumberCard(num) {
         if (first) first.classList.add('invite');
     }
 
-    // Main card tap (anywhere except the ✨ button)
+    // Number label tap — announce choice and invite child to count
+    card.querySelector('.num-label').addEventListener('pointerdown', async e => {
+        e.stopPropagation();
+        await handleNumberTap(num, card);
+    });
+
+    // Main card tap (dinos + background, but not ✨ button or number label)
     card.addEventListener('pointerdown', async e => {
         if (e.target.closest('.story-btn')) return;
+        if (e.target.closest('.num-label')) return;
         await handleCardTap(num, card);
     });
 
@@ -933,6 +942,15 @@ toggleBtn.addEventListener('pointerdown', () => {
 scrambleBtn.addEventListener('pointerdown', () => { scramble(); });
 
 startBtn.addEventListener('pointerdown', async () => {
+    // iOS requires speechSynthesis.speak() to be called synchronously inside a user
+    // gesture to unlock audio for the session. cancel() alone is NOT enough —
+    // you must actually call speak() (even silently) to prime the audio engine.
+    if (window.speechSynthesis) {
+        const unlock = new SpeechSynthesisUtterance('');
+        unlock.volume = 0;
+        window.speechSynthesis.speak(unlock);
+    }
+
     startOverlay.style.opacity = '0';
     setTimeout(async () => {
         startOverlay.style.display = 'none';
