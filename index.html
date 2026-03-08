@@ -891,20 +891,38 @@ function createNumberCard(num) {
         if (first) first.classList.add('invite');
     }
 
-    // Number label — always starts / restarts the teach sequence
-    card.querySelector('.num-label').onpointerdown = e => {
-        e.stopPropagation();
-        handleCardTap(num, card);
+    // ── Belt-and-suspenders tap helper ─────────────────────────────────────
+    // iOS may fire touchstart, pointerdown, or click — sometimes only one,
+    // depending on whether the event originates inside an SVG child element.
+    // Register all three on every interactive element; busy flag prevents
+    // double-execution if more than one fires for the same tap.
+    const onTap = (el, fn) => {
+        const wrap = e => { e.stopPropagation(); fn(); };
+        el.addEventListener('touchstart',  wrap, { passive: true });
+        el.addEventListener('pointerdown', wrap);
+        el.addEventListener('click',       wrap);
     };
+
+    // Number label — always starts / restarts the teach sequence
+    onTap(card.querySelector('.num-label'), () => handleCardTap(num, card));
 
     // Story button ✨
-    card.querySelector('.story-btn').onpointerdown = e => {
-        e.stopPropagation();
-        playDinoStory(num, card);
-    };
+    onTap(card.querySelector('.story-btn'), () => playDinoStory(num, card));
 
-    // Card / dino area
-    card.onpointerdown = () => handleCardTap(num, card);
+    // Each dino SVG gets its OWN direct listeners.
+    // iOS Safari does NOT reliably bubble touchstart/pointerdown from SVG
+    // child elements (<path>, <circle>, <ellipse>) up to the parent HTML div,
+    // so we MUST attach directly here instead of relying on card-level bubbling.
+    card.querySelectorAll('.counter-dino').forEach(dino => {
+        onTap(dino, () => handleCardTap(num, card));
+    });
+
+    // Card background fallback — fires when the user taps an empty area
+    // (not a dino, not the label, not the story button).
+    // stopPropagation() on child handlers above prevents double-fires.
+    card.addEventListener('touchstart',  () => handleCardTap(num, card), { passive: true });
+    card.addEventListener('pointerdown', () => handleCardTap(num, card));
+    card.addEventListener('click',       () => handleCardTap(num, card));
 
     return card;
 }
