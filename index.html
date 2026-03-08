@@ -677,7 +677,7 @@ function toggleFullscreen() {
 ['fullscreenchange','webkitfullscreenchange'].forEach(e =>
     document.addEventListener(e, updateFsIcons)
 );
-document.getElementById('fullscreenBtn').addEventListener('click', toggleFullscreen);
+document.getElementById('fullscreenBtn').addEventListener('pointerdown', toggleFullscreen);
 
 // ── Speech synthesis ──────────────────────────────────────────────────────────
 // Returns a Promise so counting can await each number before moving on.
@@ -931,7 +931,7 @@ function createNumberCard(num) {
     }
 
     // Number label tap — begins I-do → You-do sequence
-    card.querySelector('.num-label').addEventListener('click', function(e) {
+    card.querySelector('.num-label').addEventListener('pointerdown', function(e) {
         e.stopPropagation();
         if (counting.busy || isGameMode) return;
         counting.busy = true;
@@ -939,13 +939,13 @@ function createNumberCard(num) {
     });
 
     // Main card tap (dinos + background, but not ✨ button or number label)
-    card.addEventListener('click', function(e) {
+    card.addEventListener('pointerdown', function(e) {
         if (e.target.closest('.story-btn') || e.target.closest('.num-label')) return;
         handleCardTap(num, card);
     });
 
     // Story button — speak() fires here, in gesture context
-    card.querySelector('.story-btn').addEventListener('click', function(e) {
+    card.querySelector('.story-btn').addEventListener('pointerdown', function(e) {
         e.stopPropagation();
         playDinoStory(num, card);
     });
@@ -983,14 +983,14 @@ function scramble() {
 }
 
 // ── Button wiring ─────────────────────────────────────────────────────────────
-toggleBtn.addEventListener('click', () => {
+toggleBtn.addEventListener('pointerdown', () => {
     if (counting.busy) return;
     showCounters = !showCounters;
     statusText.textContent = showCounters ? 'ON' : 'OFF';
     renderBoard();
 });
 
-scrambleBtn.addEventListener('click', () => {
+scrambleBtn.addEventListener('pointerdown', () => {
     if (isGameMode) {
         // Exit game mode back to free play
         isGameMode = false;
@@ -1006,9 +1006,10 @@ scrambleBtn.addEventListener('click', () => {
 
 startBtn.addEventListener('click', function() {
     // ── iOS audio unlock ──────────────────────────────────────────────────────
-    // iOS Safari starts speechSynthesis paused. resume() wakes it, then speak()
-    // called synchronously here — inside the gesture handler — performs the
-    // one-time unlock. Every subsequent speak() stays unlocked for the session.
+    // 'click' is a trusted event on iOS — it unlocks Web Speech API for the
+    // entire session. 'pointerdown' is NOT trusted for audio on iOS, which is
+    // why we use 'click' here specifically. All subsequent speak() calls from
+    // pointerdown handlers work because the session is already unlocked.
     if (window.speechSynthesis) window.speechSynthesis.resume();
     speak("Let's play! Tap a number!", 0.65);
 
