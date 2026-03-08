@@ -937,25 +937,24 @@ function createNumberCard(num) {
         if (first) first.classList.add('invite');
     }
 
-    // Number label tap — begins I-do → You-do sequence
-    // touchstart is trusted on iOS (unlike pointerdown) so speak() works
+    // Number label — starts the "I do → You do" teach sequence
     onTap(card.querySelector('.num-label'), function(e) {
-        e.stopPropagation();
+        e.stopPropagation();   // stops bubble so card handler below never fires
         if (counting.busy || isGameMode) return;
         counting.busy = true;
         startTeachSequence(num, card);
     });
 
-    // Main card tap (dinos + background, but not ✨ button or number label)
-    onTap(card, function(e) {
-        if (e.target.closest('.story-btn') || e.target.closest('.num-label')) return;
-        handleCardTap(num, card);
+    // Story button ✨
+    onTap(card.querySelector('.story-btn'), function(e) {
+        e.stopPropagation();   // stops bubble so card handler below never fires
+        playDinoStory(num, card);
     });
 
-    // Story button — touchstart trusted for iOS audio
-    onTap(card.querySelector('.story-btn'), function(e) {
-        e.stopPropagation();
-        playDinoStory(num, card);
+    // Card / dino tap — num-label and story-btn never reach here (stopPropagation above)
+    // No e.target.closest() check needed — that was crashing on SVG child elements
+    onTap(card, function(e) {
+        handleCardTap(num, card);
     });
 
     return card;
