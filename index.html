@@ -307,6 +307,16 @@
         .num-label { font-size: clamp(1.6rem, 7vh, 4.5rem); }
     }
 
+    /* ── Number invite: pulse to draw child's eye to tap a number ── */
+    .num-label.invite-pick {
+        animation: num-invite 2.2s ease-in-out infinite;
+    }
+    @keyframes num-invite {
+        0%, 100% { transform: scale(1);    text-shadow: 0 0 0px transparent; }
+        50%       { transform: scale(1.12); text-shadow: 0 0 24px rgba(255,190,0,0.9),
+                                                         0 0 8px  rgba(255,255,255,0.6); }
+    }
+
     /* ═══════════════════════════════════════════════════════════════
        STORY BUTTON  ✨
        Minimum 44 px — Apple HIG tap-target guideline
@@ -382,6 +392,15 @@
             filter: drop-shadow(0 0 18px rgba(255,195,0,1))
                     drop-shadow(0 0 7px rgba(255,255,255,0.7));
         }
+    }
+
+    /* ── App modeling ("watch me"): blue glow stays lit after spoken ── */
+    .counter-dino.model-active {
+        opacity: 1;
+        filter: drop-shadow(0 0 12px rgba(80,160,255,0.95))
+                drop-shadow(0 0 5px  rgba(255,255,255,0.6));
+        transform: scale(1);
+        animation: none;
     }
 
     /* ── Already counted: bright and cheerful ── */
@@ -668,20 +687,19 @@ document.getElementById('fullscreenBtn').addEventListener('pointerdown', toggleF
 //   0.45 → slow deliberate count  "one… two… three…"
 //   0.65 → calm parental instruction / storytelling pace
 //   0.68 → warm celebration, still measured
+// ── Speech: fire-and-forget ───────────────────────────────────────────────────
+// No async/await, no cancel(), no workarounds needed.
+// iOS rule: the FIRST speak() call must be synchronous inside a user-gesture
+// handler (the Start button). After that first unlock every subsequent speak()
+// — even from setTimeout callbacks — works freely for the page's lifetime.
+// Never call speechSynthesis.cancel() — it re-locks iOS.
 function speak(text, rate = 0.65) {
-    return new Promise(resolve => {
-        if (!window.speechSynthesis) { resolve(); return; }
-        const u   = new SpeechSynthesisUtterance(text);
-        u.rate    = rate;
-        u.pitch   = 1.2;
-        u.volume  = 1;
-        const max = setTimeout(resolve, text.length * 85 + 1600);
-        u.onend   = () => { clearTimeout(max); resolve(); };
-        // 'interrupted' fires on iOS when cancel() precedes speak() — not a real failure,
-        // so we ignore it and let the safety timeout handle any genuine stalls instead.
-        u.onerror = (e) => { if (e.error !== 'interrupted') { clearTimeout(max); resolve(); } };
-        window.speechSynthesis.speak(u);
-    });
+    if (!window.speechSynthesis) return;
+    const u = new SpeechSynthesisUtterance(text);
+    u.rate   = rate;
+    u.pitch  = 1.2;
+    u.volume = 1;
+    window.speechSynthesis.speak(u);
 }
 
 // ── Toast ─────────────────────────────────────────────────────────────────────
@@ -733,131 +751,158 @@ function startCountingCard(card, num) {
     if (first && showCounters) first.classList.add('invite');
 }
 
-/** Handle one tap — activates the next dino in sequence. */
-async function advanceCount() {
+// ── Teaching sequence: I do → You do ─────────────────────────────────────────
+// Called directly from a synchronous pointerdown handler so the first speak()
+// fires inside the user-gesture context (iOS requirement).
+// All subsequent speak() calls come from setTimeout callbacks — fine because
+// iOS stays unlocked after the first gesture-speak.
+const DINO_INTERVAL = 1800;  // ms per dino: speech + echo pause
+const MODEL_START   = 1300;  // ms after "Count with me!" before first dino
+
+function startTeachSequence(num, card) {
+    document.querySelectorAll('.num-label').forEach(l => l.classList.remove('invite-pick'));
+    counting.card = card;
+    counting.num  = num;
+    counting.busy = true;
+
+    const dinos = card.querySelectorAll('.counter-dino');
+    dinos.forEach(d => d.className = 'counter-dino');
+
+    // Phase 1: invitation — synchronous, still in gesture context
+    speak('Count with me!', 0.65);
+
+    // Phase 2: model each dino with blue glow + voice + echo pause
+    for (var i = 0; i < num; i++) {
+        (function(idx) {
+            setTimeout(function() {
+                var dino = dinos[idx];
+                dino.classList.add('model-active');
+                requestAnimationFrame(function() {
+                    requestAnimationFrame(function() { dino.classList.add('tap-spark'); });
+                });
+                speak(String(idx + 1), 0.40);
+            }, MODEL_START + idx * DINO_INTERVAL);
+        })(i);
+    }
+
+    var modelEnd = MODEL_START + num * DINO_INTERVAL;
+
+    // Hold full lit set, then dim
+    setTimeout(function() { dinos.forEach(function(d) { d.className = 'counter-dino'; }); }, modelEnd + 500);
+
+    // Phase 3: invite child
+    setTimeout(function() { speak('Can you count with me?', 0.65); }, modelEnd + 700);
+
+    // Phase 4: child's turn
+    setTimeout(function() {
+        counting.busy = false;
+        startCountingCard(card, num);
+    }, modelEnd + 2600);
+}
+
+/** Child taps a dino — activates next in sequence. */
+function advanceCount() {
     if (counting.busy || !counting.card) return;
 
-    const { card, num } = counting;
-    const idx = counting.next;
+    var card = counting.card;
+    var num  = counting.num;
+    var idx  = counting.next;
 
-    // Already finished — reset to let them count again
-    if (idx >= num) {
-        resetCardToIdle(card);
-        counting.card = null;
-        return;
-    }
+    if (idx >= num) { resetCardToIdle(card); counting.card = null; return; }
 
     counting.busy = true;
     counting.next++;
 
-    const dinos = card.querySelectorAll('.counter-dino');
-    const dino  = dinos[idx];
+    var dinos = card.querySelectorAll('.counter-dino');
+    var dino  = dinos[idx];
 
-    // Activate this dino
     dino.classList.remove('invite', 'tap-spark');
     dino.classList.add('active');
+    requestAnimationFrame(function() {
+        requestAnimationFrame(function() { dino.classList.add('tap-spark'); });
+    });
 
-    // Sparkle animation — double rAF trick resets the animation reliably
-    requestAnimationFrame(() =>
-        requestAnimationFrame(() => dino.classList.add('tap-spark'))
-    );
+    speak(String(counting.next), 0.45);
 
-    // Speak the number at a slow, deliberate counting pace (0.45 ≈ one beat per number)
-    speak(counting.next.toString(), 0.45);
+    setTimeout(function() {
+        counting.busy = false;
 
-    // Pause long enough for the child to hear the number and prepare the next tap
-    await new Promise(r => setTimeout(r, 480));
-    counting.busy = false;
-
-    if (counting.next === num) {
-        // ── All dinos counted — celebrate! ──
-        counting.busy = true;
-        card.classList.add('sparkle-success');
-
-        // Pause before praise — lets the last sparkle finish and gives the child
-        // a moment to see all the dinos lit up before the voice responds,
-        // the way a parent watches and smiles before saying "you did it!"
-        await new Promise(r => setTimeout(r, 900));
-
-        const label = num === 1 ? 'dinosaur' : 'dinosaurs';
-        const td = getDinoSvg(COLORS[num - 1], 0, 'dino-toast');
-        showToast(`${td} ${num}! ${td}`, COLORS[num - 1], 2800);
-        await speak(`${num} ${label}! Great job!`, 0.68);
-        // 1.2 s of silence after praise — lets the child sit in the moment
-        // before anything resets, the way a parent would pause after applauding
-        await new Promise(r => setTimeout(r, 1200));
-
-        card.classList.remove('sparkle-success');
-
-        if (isGameMode) {
-            isGameMode = false;
-            overlay.classList.remove('visible');
-            numbers = [1,2,3,4,5,6,7,8,9];
-            counting = { card: null, num: 0, next: 0, busy: false };
-            scrambleBtn.textContent = '🎲 Game!';
-            renderBoard();
+        if (counting.next === num) {
+            counting.busy = true;
+            card.classList.add('sparkle-success');
+            setTimeout(function() {
+                var label = num === 1 ? 'dinosaur' : 'dinosaurs';
+                var td = getDinoSvg(COLORS[num - 1], 0, 'dino-toast');
+                showToast(td + ' ' + num + '! ' + td, COLORS[num - 1], 2800);
+                speak(num + ' ' + label + '! Great job!', 0.68);
+            }, 900);
+            setTimeout(function() {
+                card.classList.remove('sparkle-success');
+                if (isGameMode) {
+                    isGameMode = false;
+                    overlay.classList.remove('visible');
+                    numbers = [1,2,3,4,5,6,7,8,9];
+                    counting = { card: null, num: 0, next: 0, busy: false };
+                    scrambleBtn.textContent = '🎲 Game!';
+                    renderBoard();
+                } else {
+                    counting = { card: null, num: 0, next: 0, busy: false };
+                    resetCardToIdle(card);
+                }
+            }, 900 + 1800 + 1200);
         } else {
-            counting = { card: null, num: 0, next: 0, busy: false };
-            resetCardToIdle(card); // ready to count again
+            if (dinos[counting.next]) dinos[counting.next].classList.add('invite');
         }
-    } else {
-        // ── Invite the next dino ──
-        if (dinos[counting.next]) dinos[counting.next].classList.add('invite');
-    }
+    }, 480);
 }
 
-// ── Main card-tap handler ─────────────────────────────────────────────────────
-/** Child taps the big number: announce choice, then invite them to count. */
-async function handleNumberTap(num, card) {
-    if (counting.busy) return;
-    if (isGameMode) { await handleCardTap(num, card); return; }
-    counting.busy = true;
-    const label = num === 1 ? 'dinosaur' : 'dinosaurs';
-    await speak(`You chose ${num}! Let's count to ${num}. You try!`, 0.65);
-    counting.busy = false;
-    startCountingCard(card, num);
-}
-
-async function handleCardTap(num, card) {
+function handleCardTap(num, card) {
     if (counting.busy) return;
 
     if (isGameMode) {
         if (num !== targetNum) {
-            // Wrong card
             card.classList.add('wrong-glow');
-            speak(`That's number ${num}. Can you find number ${targetNum}?`, 0.65);
-            setTimeout(() => card.classList.remove('wrong-glow'), 480);
+            speak('That\'s number ' + num + '. Can you find number ' + targetNum + '?', 0.65);
+            setTimeout(function() { card.classList.remove('wrong-glow'); }, 480);
             return;
         }
-        // ── Correct card found ──
         card.classList.add('correct-glow');
         showToast('🌟 RAWR! 🌟', '#4ade80', 1400);
         speak('Yes! Now count the dinos!', 0.65);
-        await new Promise(r => setTimeout(r, 750));
-        card.classList.remove('correct-glow');
-        overlay.classList.remove('visible');
-        isGameMode = false;
+        setTimeout(function() {
+            card.classList.remove('correct-glow');
+            overlay.classList.remove('visible');
+            isGameMode = false;
+            if (counting.card !== card) startCountingCard(card, num);
+            advanceCount();
+        }, 750);
+        return;
     }
 
-    // Start (or continue) counting on this card
-    if (counting.card !== card) startCountingCard(card, num);
-    await advanceCount();
+    if (counting.card !== card) {
+        counting.busy = true;
+        startTeachSequence(num, card);
+    } else {
+        advanceCount();
+    }
 }
 
 // ── Story button ──────────────────────────────────────────────────────────────
-async function playDinoStory(num, card) {
+function playDinoStory(num, card) {
     if (counting.busy) return;
     counting.busy = true;
 
-    const first = card.querySelector('.counter-dino');
+    var first = card.querySelector('.counter-dino');
     if (first) first.classList.add('flutter');
-    await speak(STORIES[num], 0.65);
-    if (first) first.classList.remove('flutter');
+    speak(STORIES[num], 0.65);
+    var storyMs = STORIES[num].length * 80 + 1200;
 
-    counting.busy = false;
-    // Transition straight into counting mode
-    startCountingCard(card, num);
-    await speak('Count the dinos!', 0.65);
+    setTimeout(function() {
+        if (first) first.classList.remove('flutter');
+        counting.busy = false;
+        startCountingCard(card, num);
+        speak('Count the dinos!', 0.65);
+    }, storyMs);
 }
 
 // ── Card factory ──────────────────────────────────────────────────────────────
@@ -885,21 +930,22 @@ function createNumberCard(num) {
         if (first) first.classList.add('invite');
     }
 
-    // Number label tap — announce choice and invite child to count
-    card.querySelector('.num-label').addEventListener('pointerdown', async e => {
+    // Number label tap — begins I-do → You-do sequence
+    card.querySelector('.num-label').addEventListener('pointerdown', function(e) {
         e.stopPropagation();
-        await handleNumberTap(num, card);
+        if (counting.busy || isGameMode) return;
+        counting.busy = true;
+        startTeachSequence(num, card);
     });
 
     // Main card tap (dinos + background, but not ✨ button or number label)
-    card.addEventListener('pointerdown', async e => {
-        if (e.target.closest('.story-btn')) return;
-        if (e.target.closest('.num-label')) return;
-        await handleCardTap(num, card);
+    card.addEventListener('pointerdown', function(e) {
+        if (e.target.closest('.story-btn') || e.target.closest('.num-label')) return;
+        handleCardTap(num, card);
     });
 
-    // Story button
-    card.querySelector('.story-btn').addEventListener('pointerdown', e => {
+    // Story button — speak() fires here, in gesture context
+    card.querySelector('.story-btn').addEventListener('pointerdown', function(e) {
         e.stopPropagation();
         playDinoStory(num, card);
     });
@@ -912,24 +958,28 @@ function renderBoard() {
     board.innerHTML = '';
     counting = { card: null, num: 0, next: 0, busy: false };
     numbers.forEach(n => board.appendChild(createNumberCard(n)));
+    if (!isGameMode) {
+        board.querySelectorAll('.num-label').forEach(function(l) { l.classList.add('invite-pick'); });
+    }
 }
 
 // ── Game mode — scramble cards and ask child to find a number ─────────────────
-async function scramble() {
+function scramble() {
     if (counting.busy) return;
     counting = { card: null, num: 0, next: 0, busy: false };
 
-    numbers.sort(() => Math.random() - 0.5);
+    numbers.sort(function() { return Math.random() - 0.5; });
     targetNum  = Math.floor(Math.random() * 9) + 1;
     isGameMode = true;
     renderBoard();
 
-    await new Promise(r => setTimeout(r, 60)); // let DOM paint first
-    overlay.classList.add('visible');
-    scrambleBtn.textContent = '✕ Exit';
-    targetHint.textContent = 'Find…';
-    targetDisp.textContent = targetNum;
-    await speak(`Can you find the number ${targetNum}?`, 0.65);
+    setTimeout(function() {
+        overlay.classList.add('visible');
+        scrambleBtn.textContent = '✕ Exit';
+        targetHint.textContent = 'Find…';
+        targetDisp.textContent = targetNum;
+        speak('Can you find the number ' + targetNum + '?', 0.65);
+    }, 60);
 }
 
 // ── Button wiring ─────────────────────────────────────────────────────────────
@@ -954,21 +1004,18 @@ scrambleBtn.addEventListener('pointerdown', () => {
     }
 });
 
-startBtn.addEventListener('pointerdown', async () => {
-    // iOS requires speechSynthesis.speak() to be called synchronously inside a user
-    // gesture to unlock audio for the session. cancel() alone is NOT enough —
-    // you must actually call speak() (even silently) to prime the audio engine.
-    if (window.speechSynthesis) {
-        const unlock = new SpeechSynthesisUtterance('');
-        unlock.volume = 0;
-        window.speechSynthesis.speak(unlock);
-    }
+startBtn.addEventListener('pointerdown', function() {
+    // ── iOS audio unlock ──────────────────────────────────────────────────────
+    // iOS Safari starts speechSynthesis paused. resume() wakes it, then speak()
+    // called synchronously here — inside the gesture handler — performs the
+    // one-time unlock. Every subsequent speak() stays unlocked for the session.
+    if (window.speechSynthesis) window.speechSynthesis.resume();
+    speak("Let's play! Tap a number!", 0.65);
 
     startOverlay.style.opacity = '0';
-    setTimeout(async () => {
+    setTimeout(function() {
         startOverlay.style.display = 'none';
         renderBoard();
-        await speak("Let's play! Tap a number to count the dinos!", 0.65);
     }, 400);
 });
 
