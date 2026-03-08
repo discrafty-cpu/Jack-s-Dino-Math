@@ -582,8 +582,11 @@ let targetNum    = null;
 let numbers      = [1,2,3,4,5,6,7,8,9];
 let toastTimer   = null;
 
-// Counting state — only one card can be "active" at a time
-let counting = { card: null, num: 0, next: 0, busy: false };
+// Single busy flag — prevents overlapping async interactions
+let busy       = false;
+let activeCard = null;   // card currently being counted
+let activeNum  = 0;
+let countNext  = 0;      // index of next dino to tap
 
 // ── DOM refs ─────────────────────────────────────────────────────────────────
 const board        = document.getElementById('gameBoard');
@@ -678,63 +681,45 @@ function toggleFullscreen() {
 ['fullscreenchange','webkitfullscreenchange'].forEach(e =>
     document.addEventListener(e, updateFsIcons)
 );
-onTap(document.getElementById('fullscreenBtn'), toggleFullscreen);
+document.getElementById('fullscreenBtn').onclick = toggleFullscreen;
 
-// ── Speech synthesis ──────────────────────────────────────────────────────────
-// Returns a Promise so counting can await each number before moving on.
-// A safety timeout prevents the app from freezing if speech fails
-// (common on school Chromebooks, older iPads, and whiteboard systems).
-// Rate guide (Web Speech API range 0.1–10, 1 = normal):
-//   0.45 → slow deliberate count  "one… two… three…"
-//   0.65 → calm parental instruction / storytelling pace
-//   0.68 → warm celebration, still measured
-// ── Speech ────────────────────────────────────────────────────────────────────
-// cancel() before each speak() is the iOS unlock key — it resets the synthesis
-// state so iOS keeps audio active across all subsequent calls, including those
-// from pointerdown handlers and setTimeout callbacks.
+// ── Speech — Promise-based, matches original working GAS app ─────────────────
+// Returns a Promise that resolves when the utterance finishes.
+// cancel() before each speak() keeps iOS audio unlocked across all calls.
+// Safety timeout resolves the Promise if onend never fires (known iOS bug).
 function speak(text, rate = 0.65) {
-    if (!window.speechSynthesis) return;
-    window.speechSynthesis.cancel();
-    const u = new SpeechSynthesisUtterance(text);
-    u.rate   = rate;
-    u.pitch  = 1.2;
-    u.volume = 1;
-    window.speechSynthesis.speak(u);
+    return new Promise(resolve => {
+        if (!window.speechSynthesis) { resolve(); return; }
+        let done = false;
+        const finish = () => { if (!done) { done = true; resolve(); } };
+        window.speechSynthesis.cancel();
+        const u = new SpeechSynthesisUtterance(text);
+        u.rate   = rate;
+        u.pitch  = 1.2;
+        u.volume = 1;
+        u.onend  = finish;
+        u.onerror = finish;
+        window.speechSynthesis.speak(u);
+        // Safety net: resolve after estimated duration + buffer
+        setTimeout(finish, Math.ceil(text.length * 95 / rate) + 1200);
+    });
 }
 
-// ── Tap handler helper ────────────────────────────────────────────────────────
-// pointerdown works fine on iOS when cancel() is called before each speak().
-// No fancy event gymnastics needed — this matches the original working code.
-function onTap(el, fn) {
-    el.addEventListener('pointerdown', fn);
-}
+// Simple async delay helper
+const delay = ms => new Promise(r => setTimeout(r, ms));
 
 // ── Toast ─────────────────────────────────────────────────────────────────────
 function showToast(text, color, ms = 2200) {
     if (toastTimer) clearTimeout(toastTimer);
-    toast.innerHTML   = text;   // innerHTML so SVG dinos render
+    toast.innerHTML   = text;
     toast.style.color = color;
     toast.classList.add('show');
     toastTimer = setTimeout(() => toast.classList.remove('show'), ms);
 }
 
-// ═══════════════════════════════════════════════════════════════════════════
-// DINO GRID LAYOUT
-// ─────────────────────────────────────────────────────────────────────────
-// Numbers 1–5:  single row, (num) columns — dinos are large.
-// Numbers 6–9:  two rows,   5 columns    — first row always full of 5,
-//               second row has the remainder (e.g. 7 → 5+2).
-// This makes the "5 and a bit more" structure visually obvious to toddlers.
-// ═══════════════════════════════════════════════════════════════════════════
-// getGridCols / getGridRows removed — dino-box now uses flex-wrap with fixed dino sizes
-
-// ── Per-card counting helpers ─────────────────────────────────────────────────
-
-/** Reset card to idle: all dinos dimmed, first dino inviting. */
+// ── Card helpers ──────────────────────────────────────────────────────────────
 function resetCardToIdle(card) {
-    card.querySelectorAll('.counter-dino').forEach(d => {
-        d.className = 'counter-dino'; // strip all state classes
-    });
+    card.querySelectorAll('.counter-dino').forEach(d => d.className = 'counter-dino');
     if (showCounters) {
         const first = card.querySelector('.counter-dino');
         if (first) first.classList.add('invite');
@@ -742,174 +727,145 @@ function resetCardToIdle(card) {
     card.classList.remove('correct-glow', 'wrong-glow', 'sparkle-success');
 }
 
-/** Begin (or restart) counting on a card. */
-function startCountingCard(card, num) {
-    // Reset any previously active card
-    if (counting.card && counting.card !== card) {
-        resetCardToIdle(counting.card);
-    }
-    counting.card = card;
-    counting.num  = num;
-    counting.next = 0;
-    counting.busy = false;
-    // Dim all dinos; invite the first one
-    card.querySelectorAll('.counter-dino').forEach(d => d.className = 'counter-dino');
-    const first = card.querySelector('.counter-dino');
-    if (first && showCounters) first.classList.add('invite');
-}
-
-// ── Teaching sequence: I do → You do ─────────────────────────────────────────
-// Called directly from a synchronous pointerdown handler so the first speak()
-// fires inside the user-gesture context (iOS requirement).
-// All subsequent speak() calls come from setTimeout callbacks — fine because
-// iOS stays unlocked after the first gesture-speak.
-const DINO_INTERVAL = 1800;  // ms per dino: speech + echo pause
-const MODEL_START   = 1300;  // ms after "Count with me!" before first dino
-
-function startTeachSequence(num, card) {
+// ── Teaching sequence: "I do → You do" ───────────────────────────────────────
+// async/await means timing is natural — each word waits for the previous to end.
+// No hardcoded intervals needed.
+async function teachSequence(num, card) {
     document.querySelectorAll('.num-label').forEach(l => l.classList.remove('invite-pick'));
-    counting.card = card;
-    counting.num  = num;
-    counting.busy = true;
 
     const dinos = card.querySelectorAll('.counter-dino');
     dinos.forEach(d => d.className = 'counter-dino');
 
-    // Phase 1: invitation — synchronous, still in gesture context
-    speak('Count with me!', 0.65);
+    // Phase 1: "Count with me!"
+    await speak('Count with me!');
 
-    // Phase 2: model each dino with blue glow + voice + echo pause
-    for (var i = 0; i < num; i++) {
-        (function(idx) {
-            setTimeout(function() {
-                var dino = dinos[idx];
-                dino.classList.add('model-active');
-                requestAnimationFrame(function() {
-                    requestAnimationFrame(function() { dino.classList.add('tap-spark'); });
-                });
-                speak(String(idx + 1), 0.40);
-            }, MODEL_START + idx * DINO_INTERVAL);
-        })(i);
+    // Phase 2: app models each dino (blue glow + number)
+    for (let i = 0; i < num; i++) {
+        dinos[i].classList.add('model-active');
+        requestAnimationFrame(() => requestAnimationFrame(() => dinos[i].classList.add('tap-spark')));
+        await speak(String(i + 1), 0.40);
+        await delay(250);
     }
 
-    var modelEnd = MODEL_START + num * DINO_INTERVAL;
+    await delay(400);
+    dinos.forEach(d => d.className = 'counter-dino');
 
-    // Hold full lit set, then dim
-    setTimeout(function() { dinos.forEach(function(d) { d.className = 'counter-dino'; }); }, modelEnd + 500);
+    // Phase 3: "Can you count with me?"
+    await speak('Can you count with me?');
+    await delay(500);
 
-    // Phase 3: invite child
-    setTimeout(function() { speak('Can you count with me?', 0.65); }, modelEnd + 700);
+    // Phase 4: set up child's turn
+    activeCard = card;
+    activeNum  = num;
+    countNext  = 0;
+    const first = card.querySelector('.counter-dino');
+    if (first && showCounters) first.classList.add('invite');
 
-    // Phase 4: child's turn
-    setTimeout(function() {
-        counting.busy = false;
-        startCountingCard(card, num);
-    }, modelEnd + 2600);
+    busy = false;
 }
 
-/** Child taps a dino — activates next in sequence. */
-function advanceCount() {
-    if (counting.busy || !counting.card) return;
+// ── Child taps a dino ─────────────────────────────────────────────────────────
+async function countOneDino() {
+    const card = activeCard;
+    const num  = activeNum;
+    const idx  = countNext;
 
-    var card = counting.card;
-    var num  = counting.num;
-    var idx  = counting.next;
+    if (idx >= num) { resetCardToIdle(card); activeCard = null; busy = false; return; }
 
-    if (idx >= num) { resetCardToIdle(card); counting.card = null; return; }
+    countNext++;
 
-    counting.busy = true;
-    counting.next++;
-
-    var dinos = card.querySelectorAll('.counter-dino');
-    var dino  = dinos[idx];
-
+    const dinos = card.querySelectorAll('.counter-dino');
+    const dino  = dinos[idx];
     dino.classList.remove('invite', 'tap-spark');
     dino.classList.add('active');
-    requestAnimationFrame(function() {
-        requestAnimationFrame(function() { dino.classList.add('tap-spark'); });
-    });
+    requestAnimationFrame(() => requestAnimationFrame(() => dino.classList.add('tap-spark')));
 
-    speak(String(counting.next), 0.45);
+    await speak(String(countNext), 0.45);
 
-    setTimeout(function() {
-        counting.busy = false;
-
-        if (counting.next === num) {
-            counting.busy = true;
-            card.classList.add('sparkle-success');
-            setTimeout(function() {
-                var label = num === 1 ? 'dinosaur' : 'dinosaurs';
-                var td = getDinoSvg(COLORS[num - 1], 0, 'dino-toast');
-                showToast(td + ' ' + num + '! ' + td, COLORS[num - 1], 2800);
-                speak(num + ' ' + label + '! Great job!', 0.68);
-            }, 900);
-            setTimeout(function() {
-                card.classList.remove('sparkle-success');
-                if (isGameMode) {
-                    isGameMode = false;
-                    overlay.classList.remove('visible');
-                    numbers = [1,2,3,4,5,6,7,8,9];
-                    counting = { card: null, num: 0, next: 0, busy: false };
-                    scrambleBtn.textContent = '🎲 Game!';
-                    renderBoard();
-                } else {
-                    counting = { card: null, num: 0, next: 0, busy: false };
-                    resetCardToIdle(card);
-                }
-            }, 900 + 1800 + 1200);
+    if (countNext === num) {
+        // 🎉 All dinos counted!
+        card.classList.add('sparkle-success');
+        await delay(400);
+        const label = num === 1 ? 'dinosaur' : 'dinosaurs';
+        const td    = getDinoSvg(COLORS[num - 1], 0, 'dino-toast');
+        showToast(td + ' ' + num + '! ' + td, COLORS[num - 1], 2800);
+        await speak(num + ' ' + label + '! Great job!', 0.68);
+        await delay(800);
+        card.classList.remove('sparkle-success');
+        activeCard = null;
+        countNext  = 0;
+        if (isGameMode) {
+            isGameMode = false;
+            overlay.classList.remove('visible');
+            numbers = [1,2,3,4,5,6,7,8,9];
+            scrambleBtn.textContent = '🎲 Game!';
+            busy = false;
+            renderBoard();
         } else {
-            if (dinos[counting.next]) dinos[counting.next].classList.add('invite');
+            resetCardToIdle(card);
+            busy = false;
         }
-    }, 480);
+    } else {
+        if (dinos[countNext]) dinos[countNext].classList.add('invite');
+        busy = false;
+    }
 }
 
-function handleCardTap(num, card) {
-    if (counting.busy) return;
+// ── Card / dino tap router ────────────────────────────────────────────────────
+async function handleCardTap(num, card) {
+    if (busy) return;
+    busy = true;
 
     if (isGameMode) {
         if (num !== targetNum) {
             card.classList.add('wrong-glow');
-            speak('That\'s number ' + num + '. Can you find number ' + targetNum + '?', 0.65);
-            setTimeout(function() { card.classList.remove('wrong-glow'); }, 480);
+            await speak('That\'s number ' + num + '. Can you find number ' + targetNum + '?');
+            card.classList.remove('wrong-glow');
+            busy = false;
             return;
         }
         card.classList.add('correct-glow');
         showToast('🌟 RAWR! 🌟', '#4ade80', 1400);
-        speak('Yes! Now count the dinos!', 0.65);
-        setTimeout(function() {
-            card.classList.remove('correct-glow');
-            overlay.classList.remove('visible');
-            isGameMode = false;
-            if (counting.card !== card) startCountingCard(card, num);
-            advanceCount();
-        }, 750);
+        await speak('Yes! Now count the dinos!');
+        card.classList.remove('correct-glow');
+        overlay.classList.remove('visible');
+        isGameMode = false;
+        activeCard = card;
+        activeNum  = num;
+        countNext  = 0;
+        card.querySelectorAll('.counter-dino').forEach(d => d.className = 'counter-dino');
+        const first = card.querySelector('.counter-dino');
+        if (first && showCounters) first.classList.add('invite');
+        busy = false;
         return;
     }
 
-    if (counting.card !== card) {
-        counting.busy = true;
-        startTeachSequence(num, card);
+    if (activeCard === card) {
+        await countOneDino();
     } else {
-        advanceCount();
+        if (activeCard) resetCardToIdle(activeCard);
+        activeCard = null;
+        await teachSequence(num, card);
     }
 }
 
 // ── Story button ──────────────────────────────────────────────────────────────
-function playDinoStory(num, card) {
-    if (counting.busy) return;
-    counting.busy = true;
-
-    var first = card.querySelector('.counter-dino');
+async function playDinoStory(num, card) {
+    if (busy) return;
+    busy = true;
+    const first = card.querySelector('.counter-dino');
     if (first) first.classList.add('flutter');
-    speak(STORIES[num], 0.65);
-    var storyMs = STORIES[num].length * 80 + 1200;
-
-    setTimeout(function() {
-        if (first) first.classList.remove('flutter');
-        counting.busy = false;
-        startCountingCard(card, num);
-        speak('Count the dinos!', 0.65);
-    }, storyMs);
+    await speak(STORIES[num]);
+    if (first) first.classList.remove('flutter');
+    if (activeCard && activeCard !== card) resetCardToIdle(activeCard);
+    activeCard = card;
+    activeNum  = num;
+    countNext  = 0;
+    card.querySelectorAll('.counter-dino').forEach(d => d.className = 'counter-dino');
+    const dino0 = card.querySelector('.counter-dino');
+    if (dino0 && showCounters) dino0.classList.add('invite');
+    await speak('Count the dinos!');
+    busy = false;
 }
 
 // ── Card factory ──────────────────────────────────────────────────────────────
@@ -920,7 +876,6 @@ function createNumberCard(num) {
     card.className      = 'number-card glass';
     card.dataset.number = num;
 
-    // Build dino SVG grid
     let dinoHtml = `<div class="dino-box${showCounters ? '' : ' hidden'}">`;
     for (let i = 0; i < num; i++) dinoHtml += getDinoSvg(color, i);
     dinoHtml += '</div>';
@@ -931,113 +886,99 @@ function createNumberCard(num) {
         ${dinoHtml}
     `;
 
-    // Pre-light the first dino — tells the toddler "tap here to start"
     if (showCounters) {
         const first = card.querySelector('.counter-dino');
         if (first) first.classList.add('invite');
     }
 
-    // Number label — starts the "I do → You do" teach sequence
-    onTap(card.querySelector('.num-label'), function(e) {
-        e.stopPropagation();   // stops bubble so card handler below never fires
-        if (counting.busy || isGameMode) return;
-        counting.busy = true;
-        startTeachSequence(num, card);
-    });
+    // Number label — always starts / restarts the teach sequence
+    card.querySelector('.num-label').onpointerdown = e => {
+        e.stopPropagation();
+        handleCardTap(num, card);
+    };
 
     // Story button ✨
-    onTap(card.querySelector('.story-btn'), function(e) {
-        e.stopPropagation();   // stops bubble so card handler below never fires
+    card.querySelector('.story-btn').onpointerdown = e => {
+        e.stopPropagation();
         playDinoStory(num, card);
-    });
+    };
 
-    // Card / dino tap — num-label and story-btn never reach here (stopPropagation above)
-    // No e.target.closest() check needed — that was crashing on SVG child elements
-    onTap(card, function(e) {
-        handleCardTap(num, card);
-    });
+    // Card / dino area
+    card.onpointerdown = () => handleCardTap(num, card);
 
     return card;
 }
 
-// ── Render all 9 number cards ─────────────────────────────────────────────────
+// ── Render board ──────────────────────────────────────────────────────────────
 function renderBoard() {
     board.innerHTML = '';
-    counting = { card: null, num: 0, next: 0, busy: false };
+    busy      = false;
+    activeCard = null;
+    activeNum  = 0;
+    countNext  = 0;
     numbers.forEach(n => board.appendChild(createNumberCard(n)));
     if (!isGameMode) {
-        board.querySelectorAll('.num-label').forEach(function(l) { l.classList.add('invite-pick'); });
+        board.querySelectorAll('.num-label').forEach(l => l.classList.add('invite-pick'));
     }
 }
 
-// ── Game mode — scramble cards and ask child to find a number ─────────────────
+// ── Game mode ─────────────────────────────────────────────────────────────────
 function scramble() {
-    if (counting.busy) return;
-    counting = { card: null, num: 0, next: 0, busy: false };
-
-    numbers.sort(function() { return Math.random() - 0.5; });
+    if (busy) return;
+    numbers.sort(() => Math.random() - 0.5);
     targetNum  = Math.floor(Math.random() * 9) + 1;
     isGameMode = true;
     renderBoard();
-
-    setTimeout(function() {
+    setTimeout(() => {
         overlay.classList.add('visible');
         scrambleBtn.textContent = '✕ Exit';
-        targetHint.textContent = 'Find…';
-        targetDisp.textContent = targetNum;
-        speak('Can you find the number ' + targetNum + '?', 0.65);
+        targetHint.textContent  = 'Find…';
+        targetDisp.textContent  = targetNum;
+        speak('Can you find the number ' + targetNum + '?');
     }, 60);
 }
 
 // ── Button wiring ─────────────────────────────────────────────────────────────
-onTap(toggleBtn, function() {
-    if (counting.busy) return;
+toggleBtn.onclick = () => {
+    if (busy) return;
     showCounters = !showCounters;
     statusText.textContent = showCounters ? 'ON' : 'OFF';
     renderBoard();
-});
+};
 
-onTap(scrambleBtn, function() {
+scrambleBtn.onclick = () => {
     if (isGameMode) {
-        // Exit game mode back to free play
         isGameMode = false;
         overlay.classList.remove('visible');
         numbers = [1,2,3,4,5,6,7,8,9];
-        counting = { card: null, num: 0, next: 0, busy: false };
         scrambleBtn.textContent = '🎲 Game!';
+        busy = false;
         renderBoard();
     } else {
         scramble();
     }
-});
+};
 
-startBtn.addEventListener('click', function() {
-    // ── iOS audio unlock ──────────────────────────────────────────────────────
-    // 'click' is a trusted event on iOS — it unlocks Web Speech API.
-    // All card interactions use touchstart (also trusted), so every speak()
-    // call comes from a trusted event handler.
+startBtn.onclick = function() {
     if (window.speechSynthesis) window.speechSynthesis.resume();
-    speak("Let's play! Tap a number!", 0.65);
-
+    speak("Let's play! Tap a number!");
     startOverlay.style.opacity = '0';
-    setTimeout(function() {
+    setTimeout(() => {
         startOverlay.style.display = 'none';
         renderBoard();
     }, 400);
-});
+};
 
 // ── Responsive rebuild (debounced) ────────────────────────────────────────────
 let rTimer;
 function debouncedRender() {
     clearTimeout(rTimer);
-    rTimer = setTimeout(() => { if (!counting.busy) renderBoard(); }, 180);
+    rTimer = setTimeout(() => { if (!busy) renderBoard(); }, 180);
 }
 window.addEventListener('resize', debouncedRender);
 window.addEventListener('orientationchange', () => setTimeout(debouncedRender, 320));
 
-// iOS dynamic viewport height fix
-// iOS Safari changes innerHeight when the address bar shows/hides.
-// Setting --app-height from JS gives the true usable height.
+// ── iOS dynamic viewport height ───────────────────────────────────────────────
 function setAppHeight() {
     document.documentElement.style.setProperty('--app-height', window.innerHeight + 'px');
 }
