@@ -688,13 +688,13 @@ onTap(document.getElementById('fullscreenBtn'), toggleFullscreen);
 //   0.45 → slow deliberate count  "one… two… three…"
 //   0.65 → calm parental instruction / storytelling pace
 //   0.68 → warm celebration, still measured
-// ── Speech: fire-and-forget ───────────────────────────────────────────────────
-// iOS requires each speechSynthesis.speak() call to originate from a TRUSTED
-// event. On iOS, trusted events are: touchstart and click.
-// pointerdown is NOT trusted — audio is silently blocked.
-// Never call speechSynthesis.cancel() — it re-locks iOS.
+// ── Speech ────────────────────────────────────────────────────────────────────
+// cancel() before each speak() is the iOS unlock key — it resets the synthesis
+// state so iOS keeps audio active across all subsequent calls, including those
+// from pointerdown handlers and setTimeout callbacks.
 function speak(text, rate = 0.65) {
     if (!window.speechSynthesis) return;
+    window.speechSynthesis.cancel();
     const u = new SpeechSynthesisUtterance(text);
     u.rate   = rate;
     u.pitch  = 1.2;
@@ -703,20 +703,10 @@ function speak(text, rate = 0.65) {
 }
 
 // ── Tap handler helper ────────────────────────────────────────────────────────
-// touchstart = trusted on iOS for audio, works on SVG.
-// click      = fallback for desktop/mouse.
-// _lastTap timestamp prevents the synthetic click (fired ~300ms after touch)
-// from double-triggering the handler on touch devices.
-var _lastTap = 0;
+// pointerdown works fine on iOS when cancel() is called before each speak().
+// No fancy event gymnastics needed — this matches the original working code.
 function onTap(el, fn) {
-    el.addEventListener('touchstart', function(e) {
-        _lastTap = Date.now();
-        fn(e);
-    }, { passive: true });   // passive = no preventDefault, no broken touch
-    el.addEventListener('click', function(e) {
-        if (Date.now() - _lastTap < 600) return;  // was a touch, skip
-        fn(e);
-    });
+    el.addEventListener('pointerdown', fn);
 }
 
 // ── Toast ─────────────────────────────────────────────────────────────────────
