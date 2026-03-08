@@ -677,7 +677,7 @@ function toggleFullscreen() {
 ['fullscreenchange','webkitfullscreenchange'].forEach(e =>
     document.addEventListener(e, updateFsIcons)
 );
-document.getElementById('fullscreenBtn').addEventListener('pointerdown', toggleFullscreen);
+onTap(document.getElementById('fullscreenBtn'), toggleFullscreen);
 
 // ── Speech synthesis ──────────────────────────────────────────────────────────
 // Returns a Promise so counting can await each number before moving on.
@@ -688,10 +688,9 @@ document.getElementById('fullscreenBtn').addEventListener('pointerdown', toggleF
 //   0.65 → calm parental instruction / storytelling pace
 //   0.68 → warm celebration, still measured
 // ── Speech: fire-and-forget ───────────────────────────────────────────────────
-// No async/await, no cancel(), no workarounds needed.
-// iOS rule: the FIRST speak() call must be synchronous inside a user-gesture
-// handler (the Start button). After that first unlock every subsequent speak()
-// — even from setTimeout callbacks — works freely for the page's lifetime.
+// iOS requires each speechSynthesis.speak() call to originate from a TRUSTED
+// event. On iOS, trusted events are: touchstart and click.
+// pointerdown is NOT trusted — audio is silently blocked.
 // Never call speechSynthesis.cancel() — it re-locks iOS.
 function speak(text, rate = 0.65) {
     if (!window.speechSynthesis) return;
@@ -700,6 +699,18 @@ function speak(text, rate = 0.65) {
     u.pitch  = 1.2;
     u.volume = 1;
     window.speechSynthesis.speak(u);
+}
+
+// ── Tap handler helper ────────────────────────────────────────────────────────
+// Attaches touchstart (iOS trusted, works on SVG) + click (desktop fallback).
+// touchstart calls e.preventDefault() to block the browser's synthetic click,
+// preventing double-fires on touch devices.
+function onTap(el, fn) {
+    el.addEventListener('touchstart', function(e) {
+        e.preventDefault();   // blocks the follow-up synthetic click
+        fn(e);
+    });
+    el.addEventListener('click', fn);
 }
 
 // ── Toast ─────────────────────────────────────────────────────────────────────
@@ -931,7 +942,8 @@ function createNumberCard(num) {
     }
 
     // Number label tap — begins I-do → You-do sequence
-    card.querySelector('.num-label').addEventListener('pointerdown', function(e) {
+    // touchstart is trusted on iOS (unlike pointerdown) so speak() works
+    onTap(card.querySelector('.num-label'), function(e) {
         e.stopPropagation();
         if (counting.busy || isGameMode) return;
         counting.busy = true;
@@ -939,13 +951,13 @@ function createNumberCard(num) {
     });
 
     // Main card tap (dinos + background, but not ✨ button or number label)
-    card.addEventListener('pointerdown', function(e) {
+    onTap(card, function(e) {
         if (e.target.closest('.story-btn') || e.target.closest('.num-label')) return;
         handleCardTap(num, card);
     });
 
-    // Story button — speak() fires here, in gesture context
-    card.querySelector('.story-btn').addEventListener('pointerdown', function(e) {
+    // Story button — touchstart trusted for iOS audio
+    onTap(card.querySelector('.story-btn'), function(e) {
         e.stopPropagation();
         playDinoStory(num, card);
     });
@@ -983,14 +995,14 @@ function scramble() {
 }
 
 // ── Button wiring ─────────────────────────────────────────────────────────────
-toggleBtn.addEventListener('pointerdown', () => {
+onTap(toggleBtn, function() {
     if (counting.busy) return;
     showCounters = !showCounters;
     statusText.textContent = showCounters ? 'ON' : 'OFF';
     renderBoard();
 });
 
-scrambleBtn.addEventListener('pointerdown', () => {
+onTap(scrambleBtn, function() {
     if (isGameMode) {
         // Exit game mode back to free play
         isGameMode = false;
@@ -1006,10 +1018,9 @@ scrambleBtn.addEventListener('pointerdown', () => {
 
 startBtn.addEventListener('click', function() {
     // ── iOS audio unlock ──────────────────────────────────────────────────────
-    // 'click' is a trusted event on iOS — it unlocks Web Speech API for the
-    // entire session. 'pointerdown' is NOT trusted for audio on iOS, which is
-    // why we use 'click' here specifically. All subsequent speak() calls from
-    // pointerdown handlers work because the session is already unlocked.
+    // 'click' is a trusted event on iOS — it unlocks Web Speech API.
+    // All card interactions use touchstart (also trusted), so every speak()
+    // call comes from a trusted event handler.
     if (window.speechSynthesis) window.speechSynthesis.resume();
     speak("Let's play! Tap a number!", 0.65);
 
